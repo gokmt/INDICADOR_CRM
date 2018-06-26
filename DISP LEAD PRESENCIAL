@@ -1,0 +1,189 @@
+USE [tlMain]
+GO
+
+/****** Object:  StoredProcedure [dbo].[P_UNICESUMAR_DISTR_LEAD_PRESENCIAL]    Script Date: 19/04/2018 14:25:36 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[P_UNICESUMAR_DISTR_LEAD_PRESENCIAL] AS 
+BEGIN
+	DECLARE @MESSAGE_FINALSTATE NVARCHAR(MAX)
+
+	DECLARE @USERDISTRIB INT
+	DECLARE @LeadPresencial INT
+	DECLARE @Unidade INT
+
+	DECLARE @tlPropString NVARCHAR(MAX) 
+	DECLARE @nRetVal NVARCHAR(MAX) 
+	DECLARE @tErrorString NVARCHAR(MAX) 
+	DECLARE @nEventID INT
+
+	DECLARE @USERS TABLE (QUANTIDADE INT
+						 ,aUserID INT 
+						 ,tNickName NVARCHAR(255)
+						 ,UNIDADE INT)
+	DECLARE @LEADS TABLE (nID INT
+						  ,UNIDADE INT)
+
+	INSERT INTO @LEADS
+		SELECT l.aID
+		      ,l2.[FldNumeric22077]
+		  FROM [tblObjectType20005] l    WITH (NOLOCK)
+	INNER JOIN [tblObjectType20005_3] l3 WITH (NOLOCK) ON l.aID = l3.nID
+	INNER JOIN [tblObjectType20005_2] l2 WITH (NOLOCK) ON l.aID = l2.nID
+	INNER JOIN [tblObjectType5003]    e  WITH (NOLOCK) ON e.aID = l2.[FldNumeric22088]
+	INNER JOIN [tblObjectType5003_1]  e1 WITH (NOLOCK) ON e1.nID = e.aID
+		 WHERE l3.[FldDate23105] IS NULL
+		   AND l.[nTeamID] = 15
+		   AND (l.[nOwnerID] in (0,1) or l.[nOwnerID] is null )
+		   AND l.bdeleted = 0
+		   AND e1.[FldNumeric24627] = 1 -- lead distrib sim
+		   AND l2.[FldNumeric21994] = 1 --base presencial
+		   AND l3.[FldString21979] like '%prospect%' --Situação Candidato Vestibular
+		   AND l2.[FldNumeric22077] IS NOT NULL
+			ORDER BY l.aID,l2.[FldNumeric22077] ASC 
+	  
+	  IF (SELECT COUNT(1)
+			FROM @LEADS ) = 0
+	  BEGIN
+		SET @MESSAGE_FINALSTATE = ':SEM LEADS PARA DISTRIBUIÇÃO';
+		GOTO FINALSTATE
+	  END
+
+	INSERT INTO @USERS
+	SELECT ISNULL((SELECT count(1)
+							 --,P.vToValue AS nUserID
+							FROM [tlMain].[dbo].[tbl_20005_NumericAudit] P WITH (NOLOCK)
+							INNER JOIN (SELECT MAX(D.aEventID) aEventID
+											, D.nID
+									FROM [tlMain].[dbo].[tbl_20005_NumericAudit] D WITH (NOLOCK)
+									WHERE D.nColumnID = 4800003
+								GROUP BY D.nID) M ON M.aEventID = P.aEventID AND M.nID = P.nID
+
+								INNER JOIN (SELECT nID,[FldNumeric22077]
+									FROM [tlMain].[dbo].[tblObjectType20005_2] WITH (NOLOCK)
+									) E ON E.nID = P.nID AND E.FldNumeric22077 = tb.nIndex
+
+							WHERE P.vToValue NOT IN (0,1,2) 
+							AND P.nColumnID = 4800003
+							AND CONVERT(DATE, P.dChangeTime) = CONVERT(DATE, GETDATE())
+							AND P.vToValue = a.aUserID
+							GROUP BY P.vToValue,E.FldNumeric22077),0) AS QT
+		,a.aUserID
+		,a.tNickName
+		,tb.nIndex as UnidadeLead
+  					FROM tblUser a WITH (NOLOCK)
+			   LEFT JOIN tblObjectType20005 l WITH (NOLOCK) on l.[nOwnerID] = a.aUserID
+			   LEFT JOIN tblObjectType20005_2 l2 WITH (NOLOCK) on l2.nid = l.aid
+			  INNER JOIN tblLoggedInUser b WITH (NOLOCK) on a.aUserID = b.nUserID
+			  INNER JOIN tblUserAccess ta WITH (NOLOCK) on ta.nUserID = a.aUserID
+			  INNER JOIN tblTeam t WITH (NOLOCK) on t.aTeamID = ta.nTeamID
+			  INNER JOIN (SELECT nIndex,tDisplayName  FROM TBLENUM WHERE NCONSTRAINTID =10364) tb ON tb.tDisplayName = t.tName
+				   WHERE a.nPrimaryTeam = 15
+				     AND a.nLeadDistributionStatus = 1
+				GROUP BY a.aUserID 
+						,a.tNickName
+						,tb.nIndex
+	IF (SELECT COUNT(1)
+		  FROM @USERS ) = 0
+	BEGIN
+		SET @MESSAGE_FINALSTATE = ': SEM USUÁRIOS LOGADOS PARA DISTRIBUIÇÃO';
+		GOTO FINALSTATE
+	END
+
+
+
+	  DECLARE L_LEAD_PRESENCIAL CURSOR FOR
+	    SELECT nID,UNIDADE
+		  FROM @LEADS
+	  
+	  OPEN L_LEAD_PRESENCIAL
+	  FETCH NEXT FROM  L_LEAD_PRESENCIAL INTO @LeadPresencial, @Unidade
+  
+	  WHILE @@FETCH_STATUS = 0
+	  BEGIN
+
+		  SELECT TOP 1 @USERDISTRIB = U.aUserID
+			FROM @USERS U
+		   WHERE U.UNIDADE = @Unidade
+		ORDER BY U.QUANTIDADE ASC
+
+		PRINT @LeadPresencial
+		PRINT @USERDISTRIB   
+
+		   /* SET VALUE TO LEAD PRESENCIAL OWNER PROPERTY */
+		 SET @tlPropString = '4800003='
+							+ Cast(@USERDISTRIB AS NVARCHAR ( max ))
+							+ Char(0177)
+		
+
+		EXEC @nRetVal = Sproc_updatepropertydata
+						@tPropertyString = @tlPropString
+						,@nEntityID = @LeadPresencial
+						,@nUserID = 2
+						,@nTeamID = -1
+						,@nEventID = @nEventID output
+						,@nEventType = 82
+						,@nChangeMode = 1
+						,@bReturnRecSet = 0
+						,@bTransact = 1
+						,@nRuleID = 1
+						,@tErrorString = @tErrorString output
+						,@bLight = 0
+						,@nObjType = 3
+						,@bUpdateMandatoryFlag = 0
+
+		IF ( @nRetVal <> 0 AND @tErrorString <> '' )
+		BEGIN 
+			SET @MESSAGE_FINALSTATE = 'NÃO DISTRIBUIU: '+@tErrorString 
+									 +'. Motivo: '+@nRetVal
+
+			PRINT @MESSAGE_FINALSTATE
+			BREAK
+                     
+			END /* ATUALIZAÇÃO RETORNOU ERRO */
+		 ELSE /* ATUALIZAÇÃO FUNCIONOU CORRETAMENTE */
+		 BEGIN
+						
+			INSERT INTO Unicesumar_Lead_Distrib(leadid, iduser, teamid, dh_distrib, ORIGEM)
+									VALUES (@LeadPresencial, @USERDISTRIB, 18, GETDATE(), 'LEAD_PRESENCIAL')
+		
+			UPDATE @USERS
+			   SET QUANTIDADE = QUANTIDADE+1
+			 WHERE aUserID = @USERDISTRIB
+
+			PRINT 'SUCCESS IN UPDATION' 
+					    
+			PRINT 'UPDATE TABELA DE DISTRIBUIÇÃO: '+CONVERT(VARCHAR,@LeadPresencial)
+                                            
+		END 
+
+		FETCH NEXT FROM  L_LEAD_PRESENCIAL INTO @LeadPresencial
+	  END
+
+	  CLOSE L_LEAD_PRESENCIAL
+	  DEALLOCATE L_LEAD_PRESENCIAL
+	  PRINT 'FINAL'
+
+
+	 FINALSTATE:
+	 BEGIN TRY
+		PRINT @MESSAGE_FINALSTATE
+	 END TRY
+	 BEGIN CATCH
+	 	PRINT 'TRY CATCH:'
+		CLOSE L_LEAD_PRESENCIAL
+	    DEALLOCATE L_LEAD_PRESENCIAL
+		PRINT @MESSAGE_FINALSTATE
+		PRINT Error_message()
+		PRINT Cast(Error_line() AS NVARCHAR(max))
+		PRINT Error_procedure()
+	 END CATCH
+
+END
+GO
+
+
